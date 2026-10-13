@@ -178,6 +178,11 @@ final class Recorder
 
             if ($user !== null) {
                 $x->sharedAttributes['user.id'] = $user['id'];
+
+                if (isset($user['name'])) {
+                    $x->sharedAttributes['user.name'] = $user['name'];
+                }
+
                 $x->context['user'] = Values::context($user);
             }
         });

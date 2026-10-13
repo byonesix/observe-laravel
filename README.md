@@ -20,7 +20,7 @@ Add the repository to the app's `composer.json`:
 Then require the package:
 
 ```sh
-composer require byonesix/observe-laravel:^0.3
+composer require byonesix/observe-laravel:^0.4
 ```
 
 ## Configure

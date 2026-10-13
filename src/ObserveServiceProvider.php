@@ -299,10 +299,22 @@ final class ObserveServiceProvider extends ServiceProvider
 
             return $user === null ? null : array_filter([
                 'id' => $user->getAuthIdentifier(),
-                'email' => $user instanceof Model ? $user->getAttribute('email') : null,
+                'name' => self::text($user, 'name'),
+                'email' => self::text($user, 'email'),
             ], fn (mixed $v) => $v !== null);
         } catch (Throwable) {
             return null;
         }
+    }
+
+    private static function text(object $user, string $attribute): ?string
+    {
+        if (! $user instanceof Model || ! $user->hasAttribute($attribute)) {
+            return null;
+        }
+
+        $value = $user->getAttribute($attribute);
+
+        return is_string($value) && trim($value) !== '' ? $value : null;
     }
 }
