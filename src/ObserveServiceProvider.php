@@ -119,11 +119,11 @@ final class ObserveServiceProvider extends ServiceProvider
         if (! $app->runningInConsole() || $app->runningUnitTests()) {
             $kernel = $app->make(HttpKernel::class);
 
-            if (method_exists($kernel, 'prependMiddleware')) {
+            if (method_exists($kernel, 'prependMiddleware') && method_exists($kernel, 'whenRequestLifecycleIsLongerThan')) {
                 $kernel->prependMiddleware(RecordRequest::class);
+                $kernel->whenRequestLifecycleIsLongerThan(-1, fn () => $recorder->terminating());
             }
 
-            $app->terminating(fn () => $recorder->terminating());
             $listen(RouteMatched::class, fn (RouteMatched $e) => $recorder->routeMatched($e->route, $e->request));
             $listen(RequestHandled::class, fn (RequestHandled $e) => $recorder->requestHandled($e->request, $e->response, self::user($app)));
         }

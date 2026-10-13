@@ -6,7 +6,7 @@ final class Resource
 {
     public const SDK_NAME = 'observe-laravel';
 
-    public const SDK_VERSION = '0.4.0';
+    public const SDK_VERSION = '0.4.1';
 
     private ?array $resolved = null;
 
