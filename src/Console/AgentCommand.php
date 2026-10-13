@@ -5,6 +5,7 @@ namespace Observe\Laravel\Console;
 use Illuminate\Console\Command;
 use Illuminate\Contracts\Cache\Repository;
 use Observe\Laravel\Agent\Agent;
+use Observe\Laravel\Agent\CodeVersion;
 use Observe\Laravel\Envelope;
 use Observe\Laravel\Settings;
 use Observe\Laravel\Transport\Ingest;
@@ -39,19 +40,26 @@ final class AgentCommand extends Command
             }
         }
 
+        $base = $this->laravel->basePath();
         $started = self::restartMark($cache);
+        $version = CodeVersion::of($base);
+        $seen = $version;
         $checkAt = microtime(true) + self::RESTART_CHECK_SECONDS;
 
         try {
-            Agent::for($settings->agent, Ingest::fromSettings($settings), $envelope)->run(function () use (&$stop, &$checkAt, $started, $cache): bool {
+            Agent::for($settings->agent, Ingest::fromSettings($settings), $envelope)->run(function () use (&$stop, &$checkAt, &$seen, $started, $version, $base, $cache): bool {
                 if ($stop || microtime(true) < $checkAt) {
                     return $stop;
                 }
 
                 $checkAt = microtime(true) + self::RESTART_CHECK_SECONDS;
                 $mark = self::restartMark($cache);
+                $now = CodeVersion::of($base);
+                // A deploy is done once the code stops changing, so a composer install in progress does not restart the agent onto half-written files.
+                $deployed = $now !== $version && $now === $seen;
+                $seen = $now;
 
-                return $mark !== null && $mark !== $started;
+                return $deployed || ($mark !== null && $mark !== $started);
             });
         } catch (RuntimeException $e) {
             $this->error($e->getMessage());

@@ -48,7 +48,7 @@ php artisan vendor:publish --tag=observe-config
 
 With the agent, PHP workers write their data to `storage/observe/agent` and the agent sends it. Without it, each worker sends directly.
 
-Run `php artisan observe:agent` as a long-running process, as the same user as PHP-FPM, and set `OBSERVE_AGENT=true`. The agent restarts when `php artisan queue:restart` runs. When the agent is not running, workers send directly.
+Run `php artisan observe:agent` as a long-running process, as the same user as PHP-FPM, and set `OBSERVE_AGENT=true`. The agent restarts by itself when a new release is activated, or when `.env`, the config cache or the installed packages change. When the agent is not running, workers send directly.
 
 `ext-pcntl` lets the agent finish its sends before it stops.
 
