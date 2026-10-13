@@ -29,7 +29,7 @@ final class CurlMultiSender implements Sender
         $handle = $this->ingest->handle($body, self::CONNECT_TIMEOUT_MS, self::TIMEOUT_MS);
 
         if ($handle === null || curl_multi_add_handle($this->multi, $handle) !== CURLM_OK) {
-            $this->done[] = new Completion($file, Result::Failed);
+            $this->done[] = new Completion($file, Result::Failed, 'could not build the request');
 
             return;
         }
@@ -90,7 +90,7 @@ final class CurlMultiSender implements Sender
             $file = $this->transfers[spl_object_id($handle)][1];
             unset($this->transfers[spl_object_id($handle)]);
             curl_multi_remove_handle($this->multi, $handle);
-            $done[] = new Completion($file, Ingest::result($handle, $info['result']));
+            $done[] = new Completion($file, Ingest::result($handle, $info['result']), Ingest::detail($handle, $info['result']), (float) curl_getinfo($handle, CURLINFO_TOTAL_TIME));
         }
 
         return $done;

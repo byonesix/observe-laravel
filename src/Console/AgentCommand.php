@@ -3,24 +3,23 @@
 namespace Observe\Laravel\Console;
 
 use Illuminate\Console\Command;
-use Illuminate\Contracts\Cache\Repository;
 use Observe\Laravel\Agent\Agent;
-use Observe\Laravel\Agent\CodeVersion;
+use Observe\Laravel\Agent\PackageVersion;
+use Observe\Laravel\Agent\Report;
 use Observe\Laravel\Envelope;
 use Observe\Laravel\Settings;
 use Observe\Laravel\Transport\Ingest;
 use RuntimeException;
-use Throwable;
 
 final class AgentCommand extends Command
 {
-    public const RESTART_CHECK_SECONDS = 5.0;
+    public const VERSION_CHECK_SECONDS = 60.0;
 
     protected $signature = Settings::AGENT_COMMAND;
 
     protected $description = 'Send the Observe data that workers spool on this server';
 
-    public function handle(Settings $settings, Envelope $envelope, Repository $cache): int
+    public function handle(Settings $settings, Envelope $envelope): int
     {
         if ($settings->agent === null || ! $settings->sends()) {
             $this->error('Set OBSERVE_AGENT=true and OBSERVE_KEY to run the Observe agent.');
@@ -40,26 +39,28 @@ final class AgentCommand extends Command
             }
         }
 
-        $base = $this->laravel->basePath();
-        $started = self::restartMark($cache);
-        $version = CodeVersion::of($base);
-        $seen = $version;
-        $checkAt = microtime(true) + self::RESTART_CHECK_SECONDS;
+        $report = new Report(fn (string $line) => $this->line(date('Y-m-d H:i:s').' '.$line));
+        $package = dirname(__DIR__, 2);
+        $version = PackageVersion::installed($package);
+        $checkAt = microtime(true) + self::VERSION_CHECK_SECONDS;
+        $report->say("Observe agent {$version} started. Sending {$settings->agent->path} to {$settings->endpoint}.");
 
         try {
-            Agent::for($settings->agent, Ingest::fromSettings($settings), $envelope)->run(function () use (&$stop, &$checkAt, &$seen, $started, $version, $base, $cache): bool {
+            Agent::for($settings->agent, Ingest::fromSettings($settings), $envelope, $report)->run(function () use (&$stop, &$checkAt, $package, $version, $report): bool {
                 if ($stop || microtime(true) < $checkAt) {
                     return $stop;
                 }
 
-                $checkAt = microtime(true) + self::RESTART_CHECK_SECONDS;
-                $mark = self::restartMark($cache);
-                $now = CodeVersion::of($base);
-                // A deploy is done once the code stops changing, so a composer install in progress does not restart the agent onto half-written files.
-                $deployed = $now !== $version && $now === $seen;
-                $seen = $now;
+                $checkAt = microtime(true) + self::VERSION_CHECK_SECONDS;
+                $installed = PackageVersion::installed($package);
 
-                return $deployed || ($mark !== null && $mark !== $started);
+                if ($installed === null || $installed === $version) {
+                    return false;
+                }
+
+                $report->say("observe-laravel {$installed} was deployed. Restarting.");
+
+                return true;
             });
         } catch (RuntimeException $e) {
             $this->error($e->getMessage());
@@ -68,14 +69,5 @@ final class AgentCommand extends Command
         }
 
         return self::SUCCESS;
-    }
-
-    private static function restartMark(Repository $cache): mixed
-    {
-        try {
-            return $cache->get('illuminate:queue:restart');
-        } catch (Throwable) {
-            return null;
-        }
     }
 }

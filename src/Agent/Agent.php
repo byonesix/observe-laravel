@@ -34,6 +34,8 @@ final class Agent
 
     private float $nextReport = 0.0;
 
+    private readonly Report $report;
+
     public function __construct(
         private readonly Spool $spool,
         private readonly Backlog $backlog,
@@ -41,25 +43,36 @@ final class Agent
         private readonly Sender $sender,
         private readonly Envelope $envelope,
         private readonly Closure $clock,
+        ?Report $report = null,
     ) {
         $this->drops = new Drops;
+        $this->report = $report ?? Report::silent();
     }
 
-    public static function for(AgentSettings $settings, Ingest $ingest, Envelope $envelope): self
+    public static function for(AgentSettings $settings, Ingest $ingest, Envelope $envelope, ?Report $report = null): self
     {
         return new self(
-            new Spool($settings->path),
+            // A zero-downtime release reaches storage through a symlink, and the release this agent started from is deleted a few deploys later.
+            new Spool(realpath($settings->path) ?: $settings->path),
             new Backlog($settings->maxBytes, $settings->maxFiles),
             new Health(fn (float $seconds): float => $seconds * (0.8 + 0.4 * mt_rand() / mt_getrandmax())),
             new CurlMultiSender($ingest),
             $envelope,
             fn (): float => microtime(true),
+            $report,
         );
     }
 
     public function run(Closure $stopping): void
     {
+        $waiting = false;
+
         while (! $this->spool->lock()) {
+            if (! $waiting) {
+                $this->report->say('Another Observe agent is running on this directory. Waiting for it to stop.');
+                $waiting = true;
+            }
+
             if ($stopping()) {
                 return;
             }
@@ -101,6 +114,7 @@ final class Agent
         }
 
         $this->heartbeat($now);
+        $this->report->tick($now);
 
         while ($this->backlog->inFlight() < $this->health->allowance($now) && ($file = $this->backlog->next($now)) !== null) {
             $body = $this->spool->read($file);
@@ -135,6 +149,7 @@ final class Agent
             }
 
             $this->health->record($completion->result, $startedAt, $now);
+            $this->report->completed($completion, $now);
 
             if ($completion->result === Result::Accepted) {
                 $this->report($now);

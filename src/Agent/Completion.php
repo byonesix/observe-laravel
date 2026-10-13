@@ -9,5 +9,7 @@ final readonly class Completion
     public function __construct(
         public SpoolFile $file,
         public Result $result,
+        public string $detail = '',
+        public float $seconds = 0.0,
     ) {}
 }

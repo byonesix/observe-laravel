@@ -46,6 +46,13 @@ final readonly class Ingest
         return $handle;
     }
 
+    public static function detail(CurlHandle $handle, int $errno): string
+    {
+        return $errno !== 0
+            ? 'curl error '.$errno.': '.curl_strerror($errno)
+            : 'HTTP '.(int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
+    }
+
     public static function result(CurlHandle $handle, int $errno): Result
     {
         return Result::fromHttp($errno, (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE));
