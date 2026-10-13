@@ -44,7 +44,7 @@
     "scripts": {
         "test": [
             "@php -d pcre.jit=1 vendor/bin/phpunit",
-            "@php -d pcre.jit=0 vendor/bin/phpunit --filter 'HostileShapes|SecretPlacementFuzz|ScrubberLeakTable'"
+            "@php -d pcre.jit=0 vendor/bin/phpunit --filter 'HostileShapes|SecretPlacementFuzz|ScrubberLeakTable|ScrubberSharedCases'"
         ],
         "analyse": "phpstan analyse --memory-limit=1G"
     },
