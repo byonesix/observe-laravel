@@ -20,7 +20,7 @@ Add the repository to the app's `composer.json`:
 Then require the package:
 
 ```sh
-composer require byonesix/observe-laravel:^0.4
+composer require byonesix/observe-laravel:^0.5
 ```
 
 ## Configure
@@ -43,6 +43,29 @@ To change other settings, publish the config file:
 ```sh
 php artisan vendor:publish --tag=observe-config
 ```
+
+## What is recorded
+
+The package records each request, queued job, command and scheduled task as a trace. Inside it, the package records these spans:
+
+| Span | Name | Attributes |
+| --- | --- | --- |
+| Database query | The SQL, with string literals replaced by `?` | Connection and driver. |
+| Outgoing HTTP request | Method and host | Status code and URL. |
+| Cache call | The operation and key, for example `get plan:17` | Store, and `cache.hit` on a `get`. A failed write or forget has the error status. |
+| Job dispatch | The job class | Connection, queue, job ID and delay. |
+| Mail | The mailable class, the notification class for mail that a notification sends, or `mail` | Mailer. |
+| Notification | The notification class and channel, for example `OrderShipped via mail` | Channel. |
+
+Mail and notification spans do not record recipients, subjects or message content. Cache spans do not record values.
+
+The package does not record a cache call whose key is the ID of an active session. A cache-backed session driver (`redis`, `memcached`, `dynamodb` or `apc`) uses the session ID as its cache key, so its reads, writes and the forget after a regenerate are not recorded.
+
+A cache span name contains the full key. Do not put personal data in cache keys. Some keys that Laravel packages make do contain it: the login throttle of Fortify and Breeze uses the email address and IP address, for example `jane@example.com|203.0.113.7`, and that key appears in span names.
+
+A dispatch span links to the job that it queued: the job's trace continues from the dispatch span. A trace that is not sampled still sends its dispatch spans, and the job span of each dispatch that ran in the same process, so that jobs stay linked to the request that started them.
+
+Each execution keeps at most 2,000 spans, of which at most 500 are cache spans. The package counts the spans that it drops and sends the count with the execution.
 
 ## Agent
 

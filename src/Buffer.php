@@ -9,6 +9,8 @@ final class Buffer
 {
     public const MAX_SPANS = 2000;
 
+    public const MAX_CACHE_SPANS = 500;
+
     public const MAX_LOGS = 1000;
 
     public const MAX_ERRORS = 25;
@@ -33,6 +35,8 @@ final class Buffer
 
     private bool $full = false;
 
+    private int $cacheSpans = 0;
+
     private WeakMap $errorIds;
 
     public function __construct()
@@ -53,7 +57,9 @@ final class Buffer
 
     public function addSpan(array $span, int $bytes): void
     {
-        if (count($this->spans) >= self::MAX_SPANS || $this->bytes + $bytes > self::MAX_BYTES) {
+        $cache = $span['kind'] === 'cache';
+
+        if (count($this->spans) >= self::MAX_SPANS || $this->bytes + $bytes > self::MAX_BYTES || ($cache && $this->cacheSpans >= self::MAX_CACHE_SPANS)) {
             $this->dropped['spans']++;
 
             return;
@@ -61,6 +67,7 @@ final class Buffer
 
         $this->spans[] = $span;
         $this->bytes += $bytes;
+        $this->cacheSpans += (int) $cache;
     }
 
     public function addLog(array $log, int $bytes): void

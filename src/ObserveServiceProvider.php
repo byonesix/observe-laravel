@@ -2,8 +2,21 @@
 
 namespace Observe\Laravel;
 
+use BackedEnum;
 use Closure;
 use GuzzleHttp\Promise\Create;
+use Illuminate\Cache\Events\CacheEvent;
+use Illuminate\Cache\Events\CacheHit;
+use Illuminate\Cache\Events\CacheMissed;
+use Illuminate\Cache\Events\ForgettingKey;
+use Illuminate\Cache\Events\KeyForgetFailed;
+use Illuminate\Cache\Events\KeyForgotten;
+use Illuminate\Cache\Events\KeyWriteFailed;
+use Illuminate\Cache\Events\KeyWritten;
+use Illuminate\Cache\Events\RetrievingKey;
+use Illuminate\Cache\Events\RetrievingManyKeys;
+use Illuminate\Cache\Events\WritingKey;
+use Illuminate\Cache\Events\WritingManyKeys;
 use Illuminate\Console\Events\CommandFinished;
 use Illuminate\Console\Events\CommandStarting;
 use Illuminate\Console\Events\ScheduledTaskFailed;
@@ -14,15 +27,23 @@ use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Contracts\Http\Kernel as HttpKernel;
 use Illuminate\Contracts\Queue\Job;
+use Illuminate\Contracts\Session\Session;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Foundation\Http\Events\RequestHandled;
 use Illuminate\Http\Client\Factory as HttpFactory;
 use Illuminate\Log\Events\MessageLogged;
+use Illuminate\Mail\Events\MessageSending;
+use Illuminate\Mail\Events\MessageSent;
+use Illuminate\Notifications\Events\NotificationFailed;
+use Illuminate\Notifications\Events\NotificationSending;
+use Illuminate\Notifications\Events\NotificationSent;
 use Illuminate\Queue\Events\JobExceptionOccurred;
 use Illuminate\Queue\Events\JobFailed;
 use Illuminate\Queue\Events\JobProcessed;
 use Illuminate\Queue\Events\JobProcessing;
+use Illuminate\Queue\Events\JobQueued;
+use Illuminate\Queue\Events\JobQueueing;
 use Illuminate\Queue\Events\JobReleasedAfterException;
 use Illuminate\Queue\Events\JobTimedOut;
 use Illuminate\Queue\Events\Looping;
@@ -43,6 +64,7 @@ use Observe\Laravel\Transport\Transport;
 use Symfony\Component\Console\Input\ArgvInput;
 use Symfony\Component\Console\Input\InputInterface;
 use Throwable;
+use UnitEnum;
 
 final class ObserveServiceProvider extends ServiceProvider
 {
@@ -143,7 +165,26 @@ final class ObserveServiceProvider extends ServiceProvider
             $app->make(HttpFactory::class)->globalMiddleware($recorder->httpMiddleware());
         }
 
-        Queue::createPayloadUsing(fn () => $recorder->queuePayload());
+        Queue::createPayloadUsing(fn (mixed $connection = null, mixed $queue = null) => $recorder->queuePayload($connection, $queue));
+        $listen(JobQueueing::class, fn (JobQueueing $e) => $recorder->jobQueueing($e->payload));
+        $listen(JobQueued::class, fn (JobQueued $e) => $recorder->jobQueued($e->connectionName, $e->queue, $e->id, $e->payload));
+
+        $cache = fn (string|array $event, Closure $listener) => $listen($event, fn (CacheEvent $e) => self::isSessionId($app, $e->key) ? null : $listener($e));
+
+        $cache(RetrievingKey::class, fn (RetrievingKey $e) => $recorder->cacheStarting('get', $e->storeName, [$e->key]));
+        $cache(RetrievingManyKeys::class, fn (RetrievingManyKeys $e) => $recorder->cacheStarting('get', $e->storeName, self::cacheKeys($e->keys)));
+        $cache(CacheHit::class, fn (CacheHit $e) => $recorder->cacheFinished('get', $e->storeName, (string) $e->key, false, ['cache.hit' => true]));
+        $cache(CacheMissed::class, fn (CacheMissed $e) => $recorder->cacheFinished('get', $e->storeName, (string) $e->key, false, ['cache.hit' => false]));
+        $cache(WritingKey::class, fn (WritingKey $e) => $recorder->cacheStarting('put', $e->storeName, [$e->key]));
+        $cache(WritingManyKeys::class, fn (WritingManyKeys $e) => $recorder->cacheStarting('put', $e->storeName, (array) $e->keys));
+        $cache([KeyWritten::class, KeyWriteFailed::class], fn (KeyWritten|KeyWriteFailed $e) => $recorder->cacheFinished('put', $e->storeName, (string) $e->key, $e instanceof KeyWriteFailed));
+        $cache(ForgettingKey::class, fn (ForgettingKey $e) => $recorder->cacheStarting('forget', $e->storeName, [$e->key]));
+        $cache([KeyForgotten::class, KeyForgetFailed::class], fn (KeyForgotten|KeyForgetFailed $e) => $recorder->cacheFinished('forget', $e->storeName, (string) $e->key, $e instanceof KeyForgetFailed));
+
+        $listen(MessageSending::class, fn (MessageSending $e) => $recorder->mailSending($e->data));
+        $listen(MessageSent::class, fn (MessageSent $e) => $recorder->mailSent($e->data));
+        $listen(NotificationSending::class, fn (NotificationSending $e) => $recorder->notificationSending($e->notification, $e->channel));
+        $listen([NotificationSent::class, NotificationFailed::class], fn (NotificationSent|NotificationFailed $e) => $recorder->notificationFinished($e->notification, $e->channel, $e instanceof NotificationFailed));
 
         $listen(JobProcessing::class, fn (JobProcessing $e) => $recorder->begin(Kind::Job, $e->job->resolveName(), self::payloadTraceparent($e->job), spl_object_id($e->job), [
             'job.connection' => $e->connectionName,
@@ -260,6 +301,37 @@ final class ObserveServiceProvider extends ServiceProvider
 
         putenv(self::TRACEPARENT_ENV.'='.$traceparent);
         $_ENV[self::TRACEPARENT_ENV] = $_SERVER[self::TRACEPARENT_ENV] = $traceparent;
+    }
+
+    private static function cacheKeys(array $keys): array
+    {
+        $names = [];
+
+        foreach ($keys as $key => $value) {
+            $names[] = match (true) {
+                is_string($key) => $key,
+                $value instanceof BackedEnum => $value->value,
+                $value instanceof UnitEnum => $value->name,
+                default => $value,
+            };
+        }
+
+        return $names;
+    }
+
+    private static function isSessionId(Application $app, mixed $key): bool
+    {
+        if (! $app->resolved('session')) {
+            return false;
+        }
+
+        foreach ($app->make('session')->getDrivers() as $session) {
+            if ($session instanceof Session && $session->getId() === $key) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static function payloadTraceparent(Job $job): ?string

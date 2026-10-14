@@ -4,6 +4,8 @@ namespace Observe\Laravel;
 
 final class Execution
 {
+    public const MAX_PENDING = 256;
+
     public readonly Buffer $buffer;
 
     public array $entryAttributes = [];
@@ -19,6 +21,8 @@ final class Execution
     public ?float $respondedAt = null;
 
     private array $open = [];
+
+    private array $pending = [];
 
     public function __construct(
         public readonly Kind $kind,
@@ -48,12 +52,12 @@ final class Execution
         return new TraceContext($this->traceId, $spanId ?? $this->currentSpanId(), $this->upstreamSampled);
     }
 
-    public function open(string $kind, string $name, int $key, array $attributes, float $now): string
+    public function open(string $kind, string $name, int $key, array $attributes, float $now, ?string $parentSpanId = null): string
     {
         $spanId = Ids::spanId();
         $this->open[] = [
             'span_id' => $spanId,
-            'parent_span_id' => $this->currentSpanId(),
+            'parent_span_id' => $parentSpanId ?? $this->currentSpanId(),
             'kind' => $kind,
             'name' => $name,
             'start' => $now,
@@ -62,6 +66,34 @@ final class Execution
         ];
 
         return $spanId;
+    }
+
+    public function pend(string $key, float $now, ?string $spanId = null, array $attributes = []): string
+    {
+        $spanId ??= Ids::spanId();
+
+        if (! isset($this->pending[$key]) && count($this->pending) >= self::MAX_PENDING) {
+            unset($this->pending[array_key_first($this->pending)]);
+        }
+
+        $this->pending[$key] = ['span_id' => $spanId, 'parent_span_id' => $this->currentSpanId(), 'start' => $now, 'attributes' => $attributes];
+
+        return $spanId;
+    }
+
+    public function restart(string $key, float $now): void
+    {
+        if (isset($this->pending[$key])) {
+            $this->pending[$key]['start'] = $now;
+        }
+    }
+
+    public function pull(string $key): ?array
+    {
+        $pending = $this->pending[$key] ?? null;
+        unset($this->pending[$key]);
+
+        return $pending;
     }
 
     public function isOpen(int $key): bool

@@ -387,15 +387,101 @@ final class Recorder
         };
     }
 
-    public function queuePayload(): array
+    public function queuePayload(mixed $connection = null, mixed $queue = null): array
     {
         try {
-            $x = $this->execution;
+            $x = $this->active();
 
-            return $x === null || $x->ended() ? [] : ['observe' => ['traceparent' => $x->trace()->traceparent()]];
+            if ($x === null) {
+                return [];
+            }
+
+            $spanId = Ids::spanId();
+            $x->pend(self::dispatchKey($spanId), microtime(true), $spanId, array_filter(['job.connection' => $connection, 'job.queue' => $queue], is_string(...)));
+
+            return ['observe' => ['traceparent' => $x->trace($spanId)->traceparent()]];
         } catch (Throwable) {
             return [];
         }
+    }
+
+    public function jobQueueing(mixed $payload): void
+    {
+        $this->guard(function () use ($payload) {
+            $x = $this->active();
+            $dispatch = $x === null ? null : self::dispatchOf($x, $payload);
+
+            if ($dispatch !== null) {
+                $x->restart(self::dispatchKey($dispatch['span_id']), microtime(true));
+            }
+        });
+    }
+
+    public function jobQueued(mixed $connection, mixed $queue, mixed $id, mixed $payload): void
+    {
+        $this->guard(function () use ($connection, $queue, $id, $payload) {
+            $x = $this->active();
+            $dispatch = $x === null ? null : self::dispatchOf($x, $payload);
+
+            if ($dispatch === null) {
+                return;
+            }
+
+            $this->finish(self::dispatchKey($dispatch['span_id']), 'dispatch', $dispatch['name'], false, array_filter([
+                'job.connection' => $connection,
+                'job.queue' => $queue,
+                'job.id' => is_int($id) || (is_string($id) && $id !== '') ? (string) $id : null,
+                'job.delay' => $dispatch['delay'],
+            ], fn (mixed $v) => is_string($v) || is_int($v)), $dispatch['span_id']);
+        });
+    }
+
+    public function cacheStarting(string $operation, mixed $store, array $keys): void
+    {
+        $this->guard(function () use ($operation, $store, $keys) {
+            $x = $this->active();
+            $now = microtime(true);
+
+            foreach ($x === null ? [] : $keys as $key) {
+                $x->pend(self::cacheKey($operation, $store, (string) $key), $now);
+            }
+        });
+    }
+
+    public function cacheFinished(string $operation, mixed $store, string $key, bool $failed, array $attributes = []): void
+    {
+        $this->guard(fn () => $this->finish(self::cacheKey($operation, $store, $key), 'cache', $operation.' '.$key, $failed, [
+            ...(is_string($store) ? ['cache.store' => $store] : []),
+            ...$attributes,
+        ]));
+    }
+
+    public function mailSending(array $data): void
+    {
+        $this->guard(fn () => $this->active()?->pend(self::mailKey($data), microtime(true)));
+    }
+
+    public function mailSent(array $data): void
+    {
+        $this->guard(function () use ($data) {
+            $name = $data['__laravel_mailable'] ?? $data['__laravel_notification'] ?? null;
+
+            $this->finish(self::mailKey($data), 'mail', is_string($name) ? $name : 'mail', false, is_string($data['mailer'] ?? null) ? ['mail.mailer' => $data['mailer']] : []);
+        });
+    }
+
+    public function notificationSending(object $notification, mixed $channel): void
+    {
+        $this->guard(fn () => $this->active()?->pend(self::notificationKey($notification, $channel), microtime(true)));
+    }
+
+    public function notificationFinished(object $notification, mixed $channel, bool $failed): void
+    {
+        $this->guard(function () use ($notification, $channel, $failed) {
+            $channel = self::channel($channel);
+
+            $this->finish(self::notificationKey($notification, $channel), 'notification', $notification::class.' via '.$channel, $failed, ['notification.channel' => $channel]);
+        });
     }
 
     public function flushAmbient(): void
@@ -444,8 +530,17 @@ final class Recorder
 
     private function start(Kind $kind, string $name, ?TraceContext $parent, float $startedAt, int $key, array $attributes): void
     {
-        if ($this->execution !== null) {
-            $this->execution->open($kind->value, $name, $key, $attributes, microtime(true));
+        $x = $this->execution;
+
+        if ($x !== null) {
+            $now = microtime(true);
+            $dispatch = $parent !== null && $parent->traceId === $x->traceId ? $x->pull(self::dispatchKey($parent->spanId)) : null;
+
+            if ($dispatch !== null) {
+                $x->span('dispatch', $name, $dispatch['start'], $now, 'ok', $dispatch['attributes'], $dispatch['span_id'], $dispatch['parent_span_id']);
+            }
+
+            $x->open($kind->value, $name, $key, $attributes, $now, $dispatch['span_id'] ?? null);
 
             return;
         }
@@ -558,7 +653,9 @@ final class Recorder
             $logs = array_map(fn (array $log) => [...$log, 'span_id' => $x->spanId], $logs);
         }
 
-        $this->deliver($entry, $keep ? $x->buffer->spans : [], self::withShared($errors, $shared), self::withShared($logs, $shared), $x->buffer->dropped, $errors === [] ? [] : $x->context);
+        $children = $keep ? $x->buffer->spans : self::links($x->buffer->spans, $x->spanId);
+
+        $this->deliver($entry, $children, self::withShared($errors, $shared), self::withShared($logs, $shared), $x->buffer->dropped, $errors === [] ? [] : $x->context);
     }
 
     private function deliver(?array $entry, array $children, array $errors, array $logs, array $dropped, array $errorContext): void
@@ -800,6 +897,84 @@ final class Recorder
         }
 
         return Values::bound((array) Values::context($data), self::MAX_BODY_BYTES);
+    }
+
+    private function finish(string $key, string $kind, string $name, bool $failed, array $attributes, ?string $spanId = null): void
+    {
+        $x = $this->active();
+
+        if ($x === null) {
+            return;
+        }
+
+        $now = microtime(true);
+        $pending = $x->pull($key);
+        $x->span($kind, $name, $pending['start'] ?? $now, $now, $failed ? 'error' : 'ok', [...$attributes, ...$pending['attributes'] ?? []], $pending['span_id'] ?? $spanId, $pending['parent_span_id'] ?? null);
+    }
+
+    private static function links(array $spans, string $entrySpanId): array
+    {
+        $dispatches = [];
+        $links = [];
+
+        foreach ($spans as $span) {
+            if ($span['kind'] === 'dispatch') {
+                $dispatches[$span['span_id']] = true;
+                $links[] = [...$span, 'parent_span_id' => $entrySpanId];
+            } elseif ($span['kind'] === Kind::Job->value && isset($dispatches[$span['parent_span_id']])) {
+                $links[] = $span;
+            }
+        }
+
+        return $links;
+    }
+
+    private static function dispatchOf(Execution $x, mixed $payload): ?array
+    {
+        $payload = is_string($payload) ? json_decode($payload, true) : null;
+        $parent = TraceContext::parse($payload['observe']['traceparent'] ?? null);
+
+        if ($parent === null || $parent->traceId !== $x->traceId) {
+            return null;
+        }
+
+        return [
+            'span_id' => $parent->spanId,
+            'name' => is_string($payload['displayName'] ?? null) ? $payload['displayName'] : 'job',
+            'delay' => is_int($payload['delay'] ?? null) && $payload['delay'] > 0 ? $payload['delay'] : null,
+        ];
+    }
+
+    private static function dispatchKey(string $spanId): string
+    {
+        return "dispatch\0{$spanId}";
+    }
+
+    private static function cacheKey(string $operation, mixed $store, string $key): string
+    {
+        return "cache\0{$operation}\0".(is_string($store) ? $store : '')."\0{$key}";
+    }
+
+    private static function mailKey(array $data): string
+    {
+        return 'mail'.(is_object($data['message'] ?? null) ? "\0".spl_object_id($data['message']) : '');
+    }
+
+    private static function notificationKey(object $notification, mixed $channel): string
+    {
+        return "notification\0".spl_object_id($notification)."\0".self::channel($channel);
+    }
+
+    private static function channel(mixed $channel): string
+    {
+        return is_string($channel) ? $channel : get_debug_type($channel);
+    }
+
+    private function active(): ?Execution
+    {
+        $x = $this->execution;
+
+        return $x === null || $x->ended() ? null : $x;
     }
 
     private function openRequest(): ?Execution
