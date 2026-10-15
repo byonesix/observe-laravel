@@ -14,6 +14,8 @@ final class Execution
 
     public array $context = [];
 
+    public ?string $sessionId = null;
+
     public bool $failed = false;
 
     public ?float $endedAt = null;

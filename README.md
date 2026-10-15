@@ -67,6 +67,10 @@ A dispatch span links to the job that it queued: the job's trace continues from 
 
 Each execution keeps at most 2,000 spans, of which at most 500 are cache spans. The package counts the spans that it drops and sends the count with the execution.
 
+### App sessions
+
+A request that carries a `traceparent` header continues that trace. A request whose W3C `baggage` header holds `observe.session=<UUIDv7>` belongs to that app session. An Electron app using `@byonesix/observe` sends both headers from `session.headers()`. The package sends the session ID as the `session_id` of the request, its spans, and its errors and logs, so the session's timeline in Observe shows the request. A missing or malformed session ID is ignored.
+
 ## Agent
 
 With the agent, PHP workers write their data to `storage/observe/agent` and the agent sends it. Without it, each worker sends directly.

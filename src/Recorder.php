@@ -133,6 +133,7 @@ final class Recorder
 
             if ($root && $this->execution?->kind === Kind::Request) {
                 $this->execution->sharedAttributes = [...$this->execution->sharedAttributes, ...ClientAgent::attributes($request->userAgent(), $this->settings->clientAgents)];
+                $this->execution->sessionId = Baggage::session($request->headers->all('baggage'));
             }
         });
     }
@@ -642,6 +643,7 @@ final class Recorder
             'duration_us' => $durationUs,
             'status' => $x->failed ? 'error' : 'ok',
             'entry' => ['sampled' => $keep],
+            'session_id' => $x->sessionId,
             'attributes' => [...$shared, ...$x->entryAttributes],
         ];
 
@@ -653,9 +655,9 @@ final class Recorder
             $logs = array_map(fn (array $log) => [...$log, 'span_id' => $x->spanId], $logs);
         }
 
-        $children = $keep ? $x->buffer->spans : self::links($x->buffer->spans, $x->spanId);
+        $children = self::inSession($keep ? $x->buffer->spans : self::links($x->buffer->spans, $x->spanId), $x->sessionId);
 
-        $this->deliver($entry, $children, self::withShared($errors, $shared), self::withShared($logs, $shared), $x->buffer->dropped, $errors === [] ? [] : $x->context);
+        $this->deliver($entry, $children, self::inSession(self::withShared($errors, $shared), $x->sessionId), self::inSession(self::withShared($logs, $shared), $x->sessionId), $x->buffer->dropped, $errors === [] ? [] : $x->context);
     }
 
     private function deliver(?array $entry, array $children, array $errors, array $logs, array $dropped, array $errorContext): void
@@ -1019,6 +1021,11 @@ final class Recorder
     private static function withShared(array $items, array $shared): array
     {
         return array_map(fn (array $item) => [...$item, 'attributes' => [...$shared, ...$item['attributes']]], $items);
+    }
+
+    private static function inSession(array $items, ?string $sessionId): array
+    {
+        return $sessionId === null ? $items : array_map(fn (array $item) => [...$item, 'session_id' => $sessionId], $items);
     }
 
     private static function reportedExplicitly(array $trace): bool
